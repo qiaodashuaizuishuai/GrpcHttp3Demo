@@ -141,6 +141,12 @@ message SubscribeResponse {
 }
 
 // --- 5. VPAR (视频参数) ---
+message VideoFov {
+  float hfov = 1;
+  float vfov = 2;
+  float dfov = 3;
+}
+
 message VideoConfig {
   CodecType codec = 1;
   int32 width = 2;
@@ -154,6 +160,9 @@ message VideoConfig {
   // 服务端转发用的相关ID：用于接收端回 ACK，以及服务端做超时重发。
   // 客户端可留空；服务端会在转发时补齐。
   string config_id = 8;
+
+  // 视场角信息，单位通常为度。
+  VideoFov fov = 9;
   
   enum CodecType {
     H264 = 0;
