@@ -257,30 +257,9 @@ namespace GrpcHttp3Demo.Core.Services
                 if (pubSession?.LastVideoConfig != null)
                 {
                     _logger.LogInformation($"[Subscribe] Replaying cached VideoConfig from {publisherSessionId} to new subscriber {subscriberSessionId}");
-                    // Forward it using the standard notification service (handles reliability, though strictly speaking 1-target here)
-                    // Note: SendVideoConfigAsync usually forwards to ALL targets.
-                    // To avoid spamming existing subscribers, we should probably call a targeted method or accept that it's okay (idempotent).
-                    // BETTER: Create a targeted send in NotificationService or just reuse but filter?
-                    // Given the design of SendVideoConfigAsync sends to `GetVideoConfigTargets`, calling it again might re-send to everyone.
-                    // Let's invoke a manual send here for just this subscriber.
-                    
-                    _ = Task.Run(async () => 
-                    {
-                        var config = pubSession.LastVideoConfig.Clone();
-                        // Reset/New ConfigID for this specific transmission
-                        // If we reuse the old one, duplicate detection might drop it (if any).
-                        // But signaling.proto says config_id is for ACK.
-                        // Let's generate a new deliverable event.
-                        
-                         // Reuse the logic inside NotificationService but for Single Target? 
-                         // For now, let's just use the NotificationService.SendVideoConfigAsync. 
-                         // WAIT: SendVideoConfigAsync pulls ALL targets. 
-                         // We only want to send to THIS subscriber.
-                         
-                         // We need a specific method in NotificationService or handle logic here.
-                         // Let's call a new method on NotificationService: SendVideoConfigToTargetAsync
-                         await _notificationService.SendVideoConfigToTargetAsync(publisherSessionId, subscriberSessionId, config);
-                    });
+
+                    var config = pubSession.LastVideoConfig.Clone();
+                    _ = _notificationService.SendVideoConfigToTargetAsync(publisherSessionId, subscriberSessionId, config);
                 }
             }
 
@@ -291,11 +270,8 @@ namespace GrpcHttp3Demo.Core.Services
                 {
                     _logger.LogInformation($"[Subscribe] Replaying cached AudioConfig from {publisherSessionId} to new subscriber {subscriberSessionId}");
 
-                    _ = Task.Run(async () =>
-                    {
-                        var config = pubSession.LastAudioConfig.Clone();
-                        await _notificationService.SendAudioConfigToTargetAsync(publisherSessionId, subscriberSessionId, config);
-                    });
+                    var config = pubSession.LastAudioConfig.Clone();
+                    _ = _notificationService.SendAudioConfigToTargetAsync(publisherSessionId, subscriberSessionId, config);
                 }
             }
 

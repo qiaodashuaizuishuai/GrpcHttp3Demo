@@ -24,7 +24,9 @@ namespace GrpcHttp3Demo.Infrastructure.Background
         private UdpSendDispatcher? _sendDispatcher;
 
         // Optional data-plane keepalive ack (DACK): per remote endpoint, at most once per 5 seconds.
-        private static readonly byte[] DackBytes = Encoding.UTF8.GetBytes("DACK");
+        private static readonly byte[] DackBytes = "DACK"u8.ToArray();
+        private static readonly byte[] AckBytes = "ACK"u8.ToArray();
+        private static readonly byte[] PongBytes = "PONG"u8.ToArray();
         private readonly ConcurrentDictionary<IPEndPoint, long> _lastDackTickMs = new();
 
         public UdpMediaServer(ConnectionManager connectionManager, UdpMetricsService metrics, ILogger<UdpMediaServer> logger, IConfiguration configuration)
@@ -74,16 +76,24 @@ namespace GrpcHttp3Demo.Infrastructure.Background
 
                     if (buffer.Length == 0) continue;
 
-                    // 1. Protocol Muxing based on first byte
-                    // 'H' (72) = HELLO, 'P' (80) = PING
-                    // 0x01 = Video, 0x02 = Pose, 0x03 = Feedback, 0x04 = Audio
                     byte prefix = buffer[0];
                     _metrics.RecordRxPacket(buffer.Length, prefix);
 
-                    if (prefix == 'H' || prefix == 'P')
+                    switch (UdpProtocolParser.GetDatagramKind(buffer))
                     {
-                        await HandleControlPacket(buffer, remoteEp);
-                        continue;
+                        case UdpDatagramKind.Hello:
+                        case UdpDatagramKind.Ping:
+                            await HandleControlPacket(buffer, remoteEp);
+                            continue;
+
+                        case UdpDatagramKind.Feedback:
+                            if (_connectionManager.TryGetFeedbackForward(remoteEp, out var robotEp, out var counter) && robotEp != null)
+                            {
+                                counter?.RecordFeedback(buffer.Length);
+                                if (_sendQueue != null) _sendQueue.Enqueue(robotEp, buffer, prefix);
+                                else _sendDispatcher?.Enqueue(robotEp, buffer, prefix);
+                            }
+                            continue;
                     }
 
                     // 2. Video/Data Packet Processing
@@ -94,18 +104,6 @@ namespace GrpcHttp3Demo.Infrastructure.Background
                     {
                         _connectionManager.UpdateUdpDataActivity(senderSessionId);
                         TryEnqueueDack(remoteEp);
-                    }
-
-                    // 3. VR feedback (0x03): fast path via VR-EP -> Robot-EP route
-                    if (prefix == 0x03)
-                    {
-                        if (_connectionManager.TryGetFeedbackForward(remoteEp, out var robotEp, out var counter) && robotEp != null)
-                        {
-                            counter?.RecordFeedback(buffer.Length);
-                            if (_sendQueue != null) _sendQueue.Enqueue(robotEp, buffer, prefix);
-                            else _sendDispatcher?.Enqueue(robotEp, buffer, prefix);
-                        }
-                        continue;
                     }
 
                     // 4. Video from Robot (0x01): forward using prebuilt ep -> targets
@@ -198,53 +196,11 @@ namespace GrpcHttp3Demo.Infrastructure.Background
             _sendDispatcher?.Enqueue(remoteEp, DackBytes, DackBytes[0]);
         }
 
-        private Task HandleControlPacket(byte[] buffer, IPEndPoint remoteEp)
+        private Task HandleControlPacket(ReadOnlySpan<byte> buffer, IPEndPoint remoteEp)
         {
             try
             {
-                string msg = Encoding.UTF8.GetString(buffer);
-                string[] parts = msg.Split('|');
-                
-                // Format: TYPE|SessionId|Timestamp|Signature
-                if (parts.Length != 4) return Task.CompletedTask;
-
-                string type = parts[0]; // HELLO or PING
-                string sessionId = parts[1];
-                string timestampStr = parts[2];
-                string signature = parts[3];
-
-                // 只接受严格格式的控制包；其它一律静默丢弃（避免日志被乱码/探测包刷屏）。
-                if (!string.Equals(type, "HELLO", StringComparison.OrdinalIgnoreCase) &&
-                    !string.Equals(type, "PING", StringComparison.OrdinalIgnoreCase))
-                {
-                    return Task.CompletedTask;
-                }
-
-                if (!Guid.TryParse(sessionId, out _))
-                {
-                    return Task.CompletedTask;
-                }
-
-                if (!long.TryParse(timestampStr, out _))
-                {
-                    return Task.CompletedTask;
-                }
-
-                static bool IsHex(string s)
-                {
-                    for (int i = 0; i < s.Length; i++)
-                    {
-                        var c = s[i];
-                        var isHex =
-                            (c >= '0' && c <= '9') ||
-                            (c >= 'a' && c <= 'f') ||
-                            (c >= 'A' && c <= 'F');
-                        if (!isHex) return false;
-                    }
-                    return true;
-                }
-
-                if (signature.Length != 64 || !IsHex(signature))
+                if (!UdpProtocolParser.TryParseControlPacket(buffer, out var packet))
                 {
                     return Task.CompletedTask;
                 }
@@ -258,17 +214,17 @@ namespace GrpcHttp3Demo.Infrastructure.Background
 
                 // 打印收到的控制包（脱敏：SessionId/Signature 都是敏感信息）
                 // HELLO 通常是低频关键事件：Info；PING 较高频：Debug
-                if (string.Equals(type, "HELLO", StringComparison.OrdinalIgnoreCase))
+                if (packet.Type == UdpControlPacketType.Hello)
                 {
-                    _logger.LogInformation($"[UDP:{type}] from={remoteEp} session={Redact(sessionId)} ts={timestampStr} sig={Redact(signature)}");
+                    _logger.LogInformation($"[UDP:{packet.RawType}] from={remoteEp} session={Redact(packet.SessionId)} ts={packet.TimestampText} sig={Redact(packet.Signature)}");
                 }
                 else
                 {
-                    _logger.LogDebug($"[UDP:{type}] from={remoteEp} session={Redact(sessionId)} ts={timestampStr} sig={Redact(signature)}");
+                    _logger.LogDebug($"[UDP:{packet.RawType}] from={remoteEp} session={Redact(packet.SessionId)} ts={packet.TimestampText} sig={Redact(packet.Signature)}");
                 }
 
                 // 1. Find Session
-                var session = _connectionManager.GetSession(sessionId);
+                var session = _connectionManager.GetSession(packet.SessionId);
                 if (session == null)
                 {
                     return Task.CompletedTask;
@@ -276,34 +232,30 @@ namespace GrpcHttp3Demo.Infrastructure.Background
 
                 // 2. Validate Signature
                 // Data = Type + SessionId + Timestamp
-                string dataToSign = type + sessionId + timestampStr;
-                if (!ValidateSignature(dataToSign, sessionId, signature))
+                string dataToSign = packet.RawType + packet.SessionId + packet.TimestampText;
+                if (!ValidateSignature(dataToSign, packet.SessionId, packet.Signature))
                 {
                     return Task.CompletedTask;
                 }
 
                 // 3. Validate Timestamp (Optional: prevent replay > 30s)
-                if (long.TryParse(timestampStr, out long ts))
+                long now = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+                if (Math.Abs(now - packet.TimestampSeconds) > 30)
                 {
-                    long now = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
-                    if (Math.Abs(now - ts) > 30)
-                    {
-                        return Task.CompletedTask;
-                    }
+                    return Task.CompletedTask;
                 }
 
                 // 4. Update Connection Info
-                _connectionManager.RegisterUdpBySession(sessionId, remoteEp);
-                
+                _connectionManager.RegisterUdpBySession(packet.SessionId, remoteEp);
+
                 // 5. Send Response (ACK or PONG)
-                string responseType = type == "HELLO" ? "ACK" : "PONG";
-                byte[] responseBytes = Encoding.UTF8.GetBytes(responseType);
+                var responseBytes = packet.Type == UdpControlPacketType.Hello ? AckBytes : PongBytes;
 
                 _sendDispatcher?.Enqueue(remoteEp, responseBytes, responseBytes[0]);
 
-                if (type == "HELLO")
+                if (packet.Type == UdpControlPacketType.Hello)
                 {
-                    _logger.LogInformation($"UDP Handshake Success: {sessionId} at {remoteEp}");
+                    _logger.LogInformation($"UDP Handshake Success: {packet.SessionId} at {remoteEp}");
                 }
             }
             catch (Exception ex)

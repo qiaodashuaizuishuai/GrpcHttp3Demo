@@ -75,41 +75,33 @@ namespace GrpcHttp3Demo.Core.Services
 
         public async Task SendVideoConfigToTargetAsync(string senderSessionId, string targetSessionId, VideoConfig config)
         {
-             // Capture loop variable
             var tid = targetSessionId;
-            
-            // Use a unique ID for this specific dispatch tracking
             var dispatchConfigId = Guid.NewGuid().ToString();
-            
-            // Clone and set new ID
+
             var configToSend = config.Clone();
             configToSend.ConfigId = dispatchConfigId;
 
-            // Run reliability loop in background (fire-and-forget from Sender perspective)
-            _ = Task.Run(async () => 
-            {
-                await _videoDeliveryService.SendReliablyAsync(
-                    dispatchConfigId,
-                    tid,
-                    async () => 
+            _ = _videoDeliveryService.SendReliablyAsync(
+                dispatchConfigId,
+                tid,
+                async () =>
+                {
+                    var evt = new EventMessage
                     {
-                        var evt = new EventMessage
-                        {
-                            SenderSessionId = senderSessionId,
-                            TargetSessionId = tid,
-                            Timestamp = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
-                            VideoConfig = configToSend // use the cloned config with tracked ID
-                        };
-                        await _connectionManager.SendEventAsync(tid, evt);
-                    },
-                    async () => 
-                    {
-                            _logger.LogWarning($"[Notification] Disconnecting {tid} due to VideoConfig delivery failure.");
-                            _connectionManager.UnregisterGrpc(tid);
-                            await Task.CompletedTask;
-                    }
-                );
-            });
+                        SenderSessionId = senderSessionId,
+                        TargetSessionId = tid,
+                        Timestamp = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+                        VideoConfig = configToSend
+                    };
+                    await _connectionManager.SendEventAsync(tid, evt);
+                },
+                async () =>
+                {
+                    _logger.LogWarning($"[Notification] Disconnecting {tid} due to VideoConfig delivery failure.");
+                    _connectionManager.UnregisterGrpc(tid);
+                    await Task.CompletedTask;
+                }
+            );
 
             await Task.CompletedTask;
         }
@@ -133,36 +125,31 @@ namespace GrpcHttp3Demo.Core.Services
         public async Task SendAudioConfigToTargetAsync(string senderSessionId, string targetSessionId, AudioConfig config)
         {
             var tid = targetSessionId;
-
             var dispatchConfigId = Guid.NewGuid().ToString();
-
             var configToSend = config.Clone();
             configToSend.ConfigId = dispatchConfigId;
 
-            _ = Task.Run(async () =>
-            {
-                await _audioDeliveryService.SendReliablyAsync(
-                    dispatchConfigId,
-                    tid,
-                    async () =>
+            _ = _audioDeliveryService.SendReliablyAsync(
+                dispatchConfigId,
+                tid,
+                async () =>
+                {
+                    var evt = new EventMessage
                     {
-                        var evt = new EventMessage
-                        {
-                            SenderSessionId = senderSessionId,
-                            TargetSessionId = tid,
-                            Timestamp = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
-                            AudioConfig = configToSend
-                        };
-                        await _connectionManager.SendEventAsync(tid, evt);
-                    },
-                    async () =>
-                    {
-                        _logger.LogWarning($"[Notification] Disconnecting {tid} due to AudioConfig delivery failure.");
-                        _connectionManager.UnregisterGrpc(tid);
-                        await Task.CompletedTask;
-                    }
-                );
-            });
+                        SenderSessionId = senderSessionId,
+                        TargetSessionId = tid,
+                        Timestamp = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+                        AudioConfig = configToSend
+                    };
+                    await _connectionManager.SendEventAsync(tid, evt);
+                },
+                async () =>
+                {
+                    _logger.LogWarning($"[Notification] Disconnecting {tid} due to AudioConfig delivery failure.");
+                    _connectionManager.UnregisterGrpc(tid);
+                    await Task.CompletedTask;
+                }
+            );
 
             await Task.CompletedTask;
         }
